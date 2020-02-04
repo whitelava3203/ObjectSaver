@@ -9,8 +9,29 @@ using System.Text;
 
 namespace ObjectSaver
 {
+    
     public static class ObjectSaver
     {
+        public static List<Assembly> LoadedAssemblies = new List<Assembly>();
+        private static Type GetType(string str)
+        {
+            Type t = Type.GetType(str);
+            if(t!=null)
+            {
+                return t;
+            }
+            else
+            {
+                foreach(Assembly assembly in LoadedAssemblies)
+                {
+                    t = assembly.GetType(str);
+                    if (t != null)
+                        return t;
+                }
+            }
+            return null;
+        }
+
         public static byte[] ToBytes(this object obj, string objname)
         {
             if (IsFirst)
@@ -19,6 +40,15 @@ namespace ObjectSaver
                 IsFirst = false;
             }
             return ObjectTree.SetTree(new NamedObject(obj, objname)).GetBytes().ToArray();
+        }
+        public static void Save(this object obj, string objname, string path)
+        {
+            if (IsFirst)
+            {
+                LoadBase();
+                IsFirst = false;
+            }
+            File.WriteAllBytes(path, obj.ToBytes("MyObject"));
         }
         public static void Save(this object obj, string path)
         {
@@ -187,6 +217,10 @@ namespace ObjectSaver
             ObjectInfo.InfoToObjectFunc.Add(typeof(double), (info) =>
             {
                 return new NamedObject(BitConverter.ToDouble(info.Data, 0), info.ObjectName);
+            });
+            ObjectInfo.InfoToObjectFunc.Add(typeof(bool), (info) =>
+            {
+                return new NamedObject(BitConverter.ToBoolean(info.Data, 0), info.ObjectName);
             });
             ObjectInfo.InfoToObjectFunc.Add(typeof(char), (info) =>
             {
@@ -425,7 +459,7 @@ namespace ObjectSaver
             {
                 ObjectInfo baseinfo = new ObjectInfo();
                 //baselist.CopyTo(bytelist);
-                baseinfo.ObjectType = Type.GetType(ReadNext(ref baselist));
+                baseinfo.ObjectType = ObjectSaver.GetType(ReadNext(ref baselist));
                 baseinfo.ObjectName = ReadNext(ref baselist);
                 int length = ReadInt(ref baselist);
                 baseinfo.Data = ReadValue(ref baselist, length).ToArray();
@@ -537,7 +571,7 @@ namespace ObjectSaver
             public static ObjectTree BytesToTree(List<byte> baselist)
             {
                 ObjectTree basetree = new ObjectTree();
-                basetree.type = Type.GetType(ReadNext(ref baselist));
+                basetree.type = ObjectSaver.GetType(ReadNext(ref baselist));
                 if (basetree.type == null)
                 {
                     throw new Exception("타입이 null");
@@ -552,7 +586,7 @@ namespace ObjectSaver
                 while (newlist.Count > 0)
                 {
 
-                    Type type = Type.GetType(SafeReadNext(newlist));
+                    Type type = ObjectSaver.GetType(SafeReadNext(newlist));
 
                     if (IsPrimitive(type))
                     {
@@ -668,7 +702,7 @@ namespace ObjectSaver
                     return false;
                 }
 
-                type = Type.GetType(strs[0]);
+                type = ObjectSaver.GetType(strs[0]);
                 name = strs[1];
 
                 if (type == null || name == null || name == "")
