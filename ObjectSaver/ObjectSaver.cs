@@ -7,12 +7,44 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 
-namespace ObjectSaver
+namespace ObjectManager
 {
     
     public static class ObjectSaver
     {
+
+
+
         public static List<Assembly> LoadedAssemblies = new List<Assembly>();
+        public static void Save(object obj, string path)
+        {
+            if (IsFirst)
+            {
+                LoadBase();
+                IsFirst = false;
+            }
+            SaveFile(path, obj.ToBytes("MyObject"));
+        }
+        public static object Load(string path)
+        {
+            if (IsFirst)
+            {
+                LoadBase();
+                IsFirst = false;
+            }
+            return ObjectTree.BytesToTree(ReadFile(path).ToList()).GetObject().Data;
+        }
+        public static T Load<T>(string path)
+        {
+            if (IsFirst)
+            {
+                LoadBase();
+                IsFirst = false;
+            }
+            return (T)ObjectTree.BytesToTree(ReadFile(path).ToList()).GetObject().Data;
+        }
+
+
         private static Type GetType(string str)
         {
             Type t = Type.GetType(str);
@@ -32,55 +64,26 @@ namespace ObjectSaver
             return null;
         }
 
-        public static byte[] ToBytes(this object obj, string objname)
+        private static byte[] ToBytes(this object obj, string objname)
         {
             if (IsFirst)
             {
                 LoadBase();
                 IsFirst = false;
             }
-            return ObjectTree.SetTree(new NamedObject(obj, objname)).GetBytes().ToArray();
+            return ObjectTree.SetTree(new NamedObject(obj, objname)).GetBytes();
         }
-        public static void Save(this object obj, string objname, string path)
-        {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            File.WriteAllBytes(path, obj.ToBytes("MyObject"));
-        }
-        public static void Save(this object obj, string path)
-        {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            File.WriteAllBytes(path, obj.ToBytes("MyObject"));
-        }
-        public static object Load(string path)
-        {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            return ObjectTree.BytesToTree(File.ReadAllBytes(path).ToList()).GetObject().Data;
-        }
-        public static T Load<T>(string path)
-        {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            return (T)ObjectTree.BytesToTree(File.ReadAllBytes(path).ToList()).GetObject().Data;
-        }
+
+        
+
+        
+
 
         private static bool IsFirst = true;
         private static void LoadBase()
         {
+            LoadedAssemblies.AddRange(AppDomain.CurrentDomain.GetAssemblies());
+
             ObjectInfo.ObjectToInfoFunc.Add(typeof(int), (nameobj) =>
             {
                 ObjectInfo info = new ObjectInfo();
@@ -361,7 +364,7 @@ namespace ObjectSaver
         }
 
 
-        public class NamedObject
+        internal class NamedObject
         {
             public object Data;
             public string Name;
@@ -383,27 +386,27 @@ namespace ObjectSaver
                 }
             }
         }
-        public class ObjectInfo
+        internal class ObjectInfo
         {
-            public static Dictionary<Type, Func<NamedObject, ObjectInfo>> ObjectToInfoFunc = new Dictionary<Type, Func<NamedObject, ObjectInfo>>();
-            public static Func<NamedObject, ObjectInfo> DefaultToInfoFunc;
-            public static Dictionary<Type, Func<ObjectInfo, NamedObject>> InfoToObjectFunc = new Dictionary<Type, Func<ObjectInfo, NamedObject>>();
-            public static Func<ObjectInfo, NamedObject> InfoToDefaultFunc;
+            internal static Dictionary<Type, Func<NamedObject, ObjectInfo>> ObjectToInfoFunc = new Dictionary<Type, Func<NamedObject, ObjectInfo>>();
+            internal static Func<NamedObject, ObjectInfo> DefaultToInfoFunc;
+            internal static Dictionary<Type, Func<ObjectInfo, NamedObject>> InfoToObjectFunc = new Dictionary<Type, Func<ObjectInfo, NamedObject>>();
+            internal static Func<ObjectInfo, NamedObject> InfoToDefaultFunc;
 
-            public Type ObjectType;
-            public string ObjectName;
-            public Byte[] Data;
-            public string GetPath()
+            internal Type ObjectType;
+            internal string ObjectName;
+            internal Byte[] Data;
+            internal string GetPath()
             {
                 return ObjectType.ToString() + @" " + ObjectName;
             }
 
-            public ObjectInfo()
+            internal ObjectInfo()
             {
 
             }
 
-            public object GetValue()
+            internal object GetValue()
             {
                 if (this.Data != null)
                 {
@@ -421,7 +424,7 @@ namespace ObjectSaver
                 return null;
             }
 
-            public static ObjectInfo GetInfo(NamedObject nameobj)
+            internal static ObjectInfo GetInfo(NamedObject nameobj)
             {
                 if (nameobj != null)
                 {
@@ -442,7 +445,7 @@ namespace ObjectSaver
             }
 
 
-            public List<byte> GetBytes()
+            internal List<byte> GetBytes()
             {
                 List<byte> baselist = new List<byte>();
                 List<byte> imshilist = new List<byte>();
@@ -455,7 +458,7 @@ namespace ObjectSaver
                 return baselist;
             }
 
-            public static ObjectInfo BytesToInfo(List<byte> baselist)// this is ref
+            internal static ObjectInfo BytesToInfo(List<byte> baselist)// this is ref
             {
                 ObjectInfo baseinfo = new ObjectInfo();
                 //baselist.CopyTo(bytelist);
@@ -468,40 +471,40 @@ namespace ObjectSaver
                 return baseinfo;
             }
         }
-        public class ObjectTree
+        internal class ObjectTree
         {
-            public static Dictionary<Type, Func<NamedObject, ObjectTree>> ObjectToTreeFunc = new Dictionary<Type, Func<NamedObject, ObjectTree>>();
-            public static Func<NamedObject, ObjectTree> DefaultToTreeFunc;
-            public static Dictionary<Type, Func<ObjectTree, NamedObject>> TreeToObjectFunc = new Dictionary<Type, Func<ObjectTree, NamedObject>>();
-            public static Func<ObjectTree, NamedObject> TreeToDefaultFunc;
-            public List<ObjectTree> InnerTreeList = new List<ObjectTree>();
-            public List<ObjectInfo> InnerDataList = new List<ObjectInfo>();
-            public Type type;
-            public string ObjectName;
-            public string GetPath()
+            internal static Dictionary<Type, Func<NamedObject, ObjectTree>> ObjectToTreeFunc = new Dictionary<Type, Func<NamedObject, ObjectTree>>();
+            internal static Func<NamedObject, ObjectTree> DefaultToTreeFunc;
+            internal static Dictionary<Type, Func<ObjectTree, NamedObject>> TreeToObjectFunc = new Dictionary<Type, Func<ObjectTree, NamedObject>>();
+            internal static Func<ObjectTree, NamedObject> TreeToDefaultFunc;
+            internal List<ObjectTree> InnerTreeList = new List<ObjectTree>();
+            internal List<ObjectInfo> InnerDataList = new List<ObjectInfo>();
+            internal Type type;
+            internal string ObjectName;
+            internal string GetPath()
             {
                 return type.ToString() + @" " + ObjectName;
             }
-            public ObjectTree()
+            internal ObjectTree()
             {
 
             }
-            public ObjectTree(Type type, string objname)
+            internal ObjectTree(Type type, string objname)
             {
                 this.type = type;
                 this.ObjectName = objname;
             }
-            public ObjectTree(NamedObject nameobj)
+            internal ObjectTree(NamedObject nameobj)
             {
                 this.type = nameobj.type;
                 this.ObjectName = nameobj.Name;
             }
 
-            public static ObjectTree SetTree(NamedObject nameobj)
+            internal static ObjectTree SetTree(NamedObject nameobj)
             {
                 return ObjectTree.DefaultToTreeFunc(nameobj);
             }
-            public void AddObject(NamedObject nameobj)
+            internal void AddObject(NamedObject nameobj)
             {
 
                 Type objtype = nameobj.Data.GetType();
@@ -539,7 +542,7 @@ namespace ObjectSaver
 
             }
 
-            public List<byte> GetBytes()
+            internal byte[] GetBytes()
             {
                 List<byte> baselist = new List<byte>();
                 List<byte> imshilist = new List<byte>();
@@ -565,11 +568,12 @@ namespace ObjectSaver
 
 
 
-                return baselist;
+                return baselist.ToArray();
             }
 
-            public static ObjectTree BytesToTree(List<byte> baselist)
+            internal static ObjectTree BytesToTree(List<byte> baselist)
             {
+
                 ObjectTree basetree = new ObjectTree();
                 basetree.type = ObjectSaver.GetType(ReadNext(ref baselist));
                 if (basetree.type == null)
@@ -602,11 +606,12 @@ namespace ObjectSaver
             }
 
 
-            public void Solidfy(string path)
+            /*
+            internal void Solidfy(string path)
             {
                 Solidfy(new DirectoryInfo(path));
             }
-            public void Solidfy(DirectoryInfo basedi)
+            internal void Solidfy(DirectoryInfo basedi)
             {
                 //Console.WriteLine("Save Object " + this.type.ToString());
                 //nowpath = Path.Combine(di.FullName, this.GetPath());
@@ -633,28 +638,11 @@ namespace ObjectSaver
                     tree.Solidfy(di);
                 }
             }
-            public void Compress(string path)
-            {
-                string folderpath = Path.Combine(path, this.GetPath());
-                this.Solidfy(path);
-                ZipFile.CreateFromDirectory(folderpath, Path.Combine(path, this.ObjectName + @".dat"));
-                DirectoryInfo di = new DirectoryInfo(folderpath);
-
-                foreach (FileInfo file in di.GetFiles())
-                {
-                    file.Delete();
-                }
-                foreach (DirectoryInfo dir in di.GetDirectories())
-                {
-                    dir.Delete(true);
-                }
-                di.Delete();
-            }
-            public static ObjectTree DeSolidfy(string path)
+            internal static ObjectTree DeSolidfy(string path)
             {
                 return DeSolidfy(new DirectoryInfo(path));
             }
-            public static ObjectTree DeSolidfy(DirectoryInfo basedi)
+            internal static ObjectTree DeSolidfy(DirectoryInfo basedi)
             {
 
                 Type type;
@@ -692,6 +680,9 @@ namespace ObjectSaver
 
 
             }
+            
+
+
             private static bool FixName(string dirname, out Type type, out string name)
             {
                 string[] strs = dirname.Split(' ');
@@ -714,6 +705,7 @@ namespace ObjectSaver
 
                 return true;
             }
+            */
             public NamedObject GetObject()
             {
 
@@ -738,6 +730,8 @@ namespace ObjectSaver
         {
 
         }
+
+
         private static string SafeReadNext(List<byte> list)
         {
             int i = 0;
@@ -780,21 +774,11 @@ namespace ObjectSaver
             list.RemoveRange(0, length);
             return bytelist;
         }
-
-        public static byte[] ToBytes(this string str)
+        internal static byte[] ToBytes(this string str)
         {
             return Encoding.UTF8.GetBytes(str);
         }
-
-
-
-
-
-
-
-
-
-        public static bool IsPrimitive(Type type)
+        private static bool IsPrimitive(Type type)
         {
             try
             {
@@ -835,7 +819,35 @@ namespace ObjectSaver
 
 
 
+        private static void SaveFile(string path, byte[] bytes)
+        {
+            File.WriteAllBytes(path, Compress(bytes));
 
+            byte[] Compress(byte[] data)
+            {
+                MemoryStream output = new MemoryStream();
+                using (DeflateStream dstream = new DeflateStream(output, CompressionLevel.Optimal))
+                {
+                    dstream.Write(data, 0, data.Length);
+                }
+                return output.ToArray();
+            }
+        }
+        private static byte[] ReadFile(string path)
+        {
+            return Decompress(File.ReadAllBytes(path));
+
+            byte[] Decompress(byte[] data)
+            {
+                MemoryStream input = new MemoryStream(data);
+                MemoryStream output = new MemoryStream();
+                using (DeflateStream dstream = new DeflateStream(input, CompressionMode.Decompress))
+                {
+                    dstream.CopyTo(output);
+                }
+                return output.ToArray();
+            }
+        }
     }
 
 }
