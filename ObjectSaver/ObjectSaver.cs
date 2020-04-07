@@ -5,837 +5,750 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization.Formatters.Binary;
 using System.Text;
+using System.Runtime.CompilerServices;
 
 namespace ObjectManager
 {
-    
-    public static class ObjectSaver
+    public class ObjectSaver
     {
 
+        /// <summary>
+        /// 저장할 경로입니다.
+        /// </summary>
+        public string path;
+        /// <summary>
+        /// 저장할 객체입니다.
+        /// </summary>
+        public object obj;
 
+        
+        public byte[] pubKey;
+        public byte[] priKey;
 
-        public static List<Assembly> LoadedAssemblies = new List<Assembly>();
-        public static void Save(object obj, string path)
+        public Header header = new Header();
+        /// <summary>
+        /// 헤더 추가의 유무입니다.
+        /// 추가하지 않으면 불러올때 똑같은 ObjectSaver 객체가 필요합니다.
+        /// </summary>
+        public bool createHeader = true;
+        public class Header
         {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            SaveFile(path, obj.ToBytes("MyObject"));
+            /// <summary>
+            /// 저장하고 불러오기 할때 압축의 유무입니다.
+            /// </summary>
+            public bool compress = true;
+            /// <summary>
+            /// 저장하고 불러오기 할때 암호화의 유무입니다.
+            /// </summary>
+            internal bool encryption = false;
+            /// <summary>
+            /// 객체의 크기를 나타낼 바이트 수입니다.
+            /// 1과 4 사이의 수를 입력해야 합니다.
+            /// </summary>
+            public ushort filesizelength = 4;
+            /// <summary>
+            /// 타입 인덱스를 나타낼 바이트 수입니다.
+            /// 1과 4 사이의 수를 입력해야 합니다.
+            /// </summary>
+            public ushort typenamelength = 4;
+            internal int typecount;
         }
-        public static object Load(string path)
-        {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            return ObjectTree.BytesToTree(ReadFile(path).ToList()).GetObject().Data;
-        }
-        public static T Load<T>(string path)
-        {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            return (T)ObjectTree.BytesToTree(ReadFile(path).ToList()).GetObject().Data;
-        }
+
+        
 
 
-        private static Type GetType(string str)
+        /// <summary>
+        /// 경로 위치에 지정된 설정을 사용해 저장합니다.
+        /// </summary>
+        public void Save()
         {
-            Type t = Type.GetType(str);
-            if(t!=null)
+            if(path == null)
             {
-                return t;
+                throw new Exception("경로가 설정되지 않았습니다.");
+            }
+            File.WriteAllBytes(path,GetBytes());
+        }
+
+        /// <summary>
+        /// 지정된 설정으로 바이트 배열을 반환합니다.
+        /// </summary>
+        public byte[] GetBytes()
+        {
+            if (obj == null)
+            {
+                throw new Exception("오브젝트가 null입니다.");
+            }
+
+            byte createheader = this.createHeader ? (byte)1 : (byte)0;
+
+
+            byte[] data = GetDataBodyBytes();
+
+            byte[] header = GetHeaderBytes();
+
+            byte[] typecount = GetTypeCount();
+
+            List<byte> result = new List<byte>(1+header.Length+data.Length+typecount.Length);
+            
+            result.Add(createheader);
+            if (this.createHeader)
+            {
+                result.AddRange(header);
+            }
+            result.AddRange(typecount);
+            result.AddRange(data);
+
+            return result.ToArray();
+
+            byte[] GetDataBodyBytes()
+            {
+                List<Type> loadedtypes = new List<Type>(50);
+
+                loadedtypes.Add(typeof(Int16));
+                loadedtypes.Add(typeof(UInt16));
+                loadedtypes.Add(typeof(Int32));
+                loadedtypes.Add(typeof(UInt32));
+                loadedtypes.Add(typeof(Int64));
+                loadedtypes.Add(typeof(UInt64));
+                loadedtypes.Add(typeof(Single));
+                loadedtypes.Add(typeof(Double));
+                loadedtypes.Add(typeof(Byte));
+                loadedtypes.Add(typeof(SByte));
+                loadedtypes.Add(typeof(Decimal));
+                loadedtypes.Add(typeof(String));
+
+                byte[] bodybytes;
+                List<byte> typenamebytelist = new List<byte>(100);
+
+
+                
+                bodybytes = GetEverythingBytes(obj, "Q");
+
+
+                for (int i = 12; i < loadedtypes.Count; i++)
+                {
+                    typenamebytelist.AddRange(Encoding.UTF8.GetBytes(loadedtypes[i].FullName));
+                    typenamebytelist.Add(Spacebar);
+                }
+                this.header.typecount = loadedtypes.Count - 12;
+
+                byte[] databytes = typenamebytelist.Concat(bodybytes).ToArray();
+
+                if (this.header.encryption)
+                {
+                    databytes = Encrypt(databytes);
+                }
+                if (this.header.compress)
+                {
+                    databytes = Compress(databytes);
+                }
+
+                return databytes;
+
+
+                byte[] GetEverythingBytes(object value, string name)
+                {
+                    if(value == null)
+                    {
+                        return new byte[0];
+                    }
+
+                    Type t = value.GetType();
+                    if (IsPrimitive(t))
+                    {
+                        return GetPrimitiveBytes(value, name);
+                    }
+                    else if (IsAwesome(t))
+                    {
+                        return GetAwesomeBytes(value, name);
+                    }
+                    else if (t.IsArray)
+                    {
+                        return GetArrayBytes(value, name);
+                    }
+                    else
+                    {
+                        return GetObjectBytes(value, name);
+                    }
+                }
+                byte[] GetObjectBytes(object obj, string name)
+                {
+                    List<byte> bytelist = new List<byte>(60);
+                    bytelist.AddRange(Trim(GetTypeIndex(obj.GetType()), this.header.typenamelength));//타입인덱스 추가
+                    if (name != "")
+                    {
+                        bytelist.AddRange(Encoding.UTF8.GetBytes(name));//이름 추가
+                        bytelist.Add(Spacebar);//스페이스바
+                    }
+
+                    List<byte> imshi = new List<byte>();
+                  
+
+                    BindingFlags bindflags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                    System.Reflection.FieldInfo[] fieldinfo = obj.GetType().GetFields(bindflags);
+                    foreach (System.Reflection.FieldInfo info in fieldinfo)
+                    {
+                        if (info.GetValue(obj) != null &&( !Attribute.IsDefined(info,typeof(IgnoreSave)) || Attribute.IsDefined(info, typeof(ForceSave))))
+                        {
+                            imshi.AddRange(GetEverythingBytes(info.GetValue(obj), info.Name));
+                        }
+                    }
+
+                    bytelist.AddRange(Trim(BitConverter.GetBytes(imshi.Count),this.header.filesizelength));
+                    bytelist.AddRange(imshi);
+
+                    return bytelist.ToArray();
+                }
+
+                byte[] GetPrimitiveBytes(object obj, string name)
+                {
+                    (byte[] data, byte index) = GetPrimitiveTypeData(obj);
+                    return GetRealBytes(data, name, index);
+
+                    byte[] GetRealBytes(byte[] bytes, string name, byte index)
+                    {
+                        List<byte> bytelist = new List<byte>();
+                        bytelist.Add(index);
+                        for (int i = 1; i < this.header.typenamelength; i++)
+                        {
+                            bytelist.Add(0);
+                        }
+                        if (name != "")
+                        {
+                            bytelist.AddRange(Encoding.UTF8.GetBytes(name));
+                            bytelist.Add(Spacebar);
+                        }
+                        bytelist.AddRange(bytes);
+                        return bytelist.ToArray();
+                    }
+                }
+                (byte[] data, byte index) GetPrimitiveTypeData(object obj)
+                {
+                    switch (obj)
+                    {
+                        case Int16 i:
+                            return (BitConverter.GetBytes(i), 0);
+                        case UInt16 i:
+                            return (BitConverter.GetBytes(i), 1);
+                        case Int32 i:
+                            return (BitConverter.GetBytes(i), 2);
+                        case UInt32 i:
+                            return (BitConverter.GetBytes(i), 3);
+                        case Int64 i:
+                            return (BitConverter.GetBytes(i), 4);
+                        case UInt64 i:
+                            return (BitConverter.GetBytes(i), 5);
+                        case Single i:
+                            return (BitConverter.GetBytes(i), 6);
+                        case Double i:
+                            return (BitConverter.GetBytes(i), 7);
+                        case Byte i:
+                            return (BitConverter.GetBytes(i), 8);
+                        case SByte i:
+                            return (BitConverter.GetBytes(i), 9);
+                        case Decimal i:
+                            return (decimal.GetBits(i).Cast<byte>().ToArray(), 10);
+                        case String i:
+                            byte[] strbyte = Encoding.UTF8.GetBytes(i);
+                            byte[] bytelength = Trim(BitConverter.GetBytes(strbyte.Length),this.header.filesizelength);
+                            return (bytelength.Concat(strbyte).ToArray(), 11);
+                        default:
+                            throw new Exception("Primitive가 아님");
+                    }
+                }
+                byte[] GetArrayBytes(object obj, string name)
+                {
+                    if (IsStaticSize(obj.GetType().GetElementType()))
+                    {
+                        return GetStaticArrayBytes(obj, name);
+                    }
+                    else
+                    {
+                        return GetDynamicArrayBytes(obj, name);
+                    }
+
+                    byte[] GetStaticArrayBytes(object obj, string name)
+                    {
+                        List<byte> bytes = new List<byte>();
+                        Type elementType = obj.GetType().GetElementType();
+                        
+                        byte[] index = GetTypeIndex(obj.GetType()); // 1
+
+                        byte[] fieldname = Encoding.UTF8.GetBytes(name); // 2 + 스페이스바
+
+                        byte[] arraylength = BitConverter.GetBytes((obj as Array).Length); // 3
+                        //배열길이는 4바이트
+
+                        bytes.AddRange(index); // 1
+                        if (name != "")
+                        {
+                            bytes.AddRange(fieldname); // 2
+                            bytes.Add(Spacebar); // 스페이스바
+                        }
+                        bytes.AddRange(arraylength); // 3
+
+                        //배열 시작부분 추가 완료
+
+                        Array objarr = obj as Array;
+
+                        foreach(object o in objarr)
+                        {
+                            bytes.AddRange(GetPrimitiveTypeData(o).data);
+                        }
+
+                        //배열 추가 완료
+
+                        return bytes.ToArray();
+                    }
+                    byte[] GetDynamicArrayBytes(object obj, string name)
+                    {
+                        List<byte> bytes = new List<byte>();
+
+                        byte[] index = GetTypeIndex(obj.GetType()); // 1
+                        
+
+                        byte[] fieldname = Encoding.UTF8.GetBytes(name); // 2 + 스페이스바
+
+                        byte[] arraylength = BitConverter.GetBytes((obj as Array).Length); // 3
+                        //배열길이는 4바이트
+
+                        bytes.AddRange(index); // 1
+                        if (name != "")
+                        {
+                            bytes.AddRange(fieldname); // 2
+                            bytes.Add(Spacebar); // 스페이스바
+                        }
+                        bytes.AddRange(arraylength); // 3
+
+                        //배열 시작부분 추가 완료
+
+                        Array objarr = obj as Array;
+
+                        foreach (object o in objarr)
+                        {
+                            bytes.AddRange(GetEverythingBytes(o,""));
+                        }
+
+                        //배열 추가 완료
+
+                        return bytes.ToArray();
+                    }
+                }
+
+                byte[] GetAwesomeBytes(object obj, string name)
+                {
+                    return new byte[0];
+                }//Func Action IEnumerator 같은거 전용
+
+                byte[] Compress(byte[] bytearray)
+                {
+                    MemoryStream output = new MemoryStream();
+                    using (DeflateStream dstream = new DeflateStream(output, CompressionLevel.Optimal))
+                    {
+                        dstream.Write(bytearray, 0, bytearray.Length);
+                    }
+                    return output.ToArray();
+                }
+                byte[] Encrypt(byte[] bytearray)
+                {
+                    return new byte[0];
+                }
+
+                byte[] GetTypeIndex(Type t)
+                {
+                    byte[] index;
+                    if (!loadedtypes.Contains(t))
+                    {
+                        loadedtypes.Add(t);
+                        index = Trim(BitConverter.GetBytes(loadedtypes.Count-1), this.header.typenamelength);
+                    }
+                    else
+                    {
+                        index = Trim(BitConverter.GetBytes(loadedtypes.IndexOf(t)), this.header.typenamelength);
+                    }
+                    return index;
+                }
+            }
+            byte[] GetHeaderBytes()
+            {
+                byte i = 0;
+
+                i += (byte)(this.header.compress ? 0 : 1);
+                i += (byte)((this.header.encryption ? 0 : 1) * 2);
+
+                i += (byte)((this.header.filesizelength-1) * 4);
+
+                i += (byte)((this.header.typenamelength-1) * 16);
+
+
+                return new byte[] { i };
+            }
+            byte[] GetTypeCount()
+            {
+                return Trim(BitConverter.GetBytes(this.header.typecount), this.header.typenamelength);
+            }
+        }
+
+        /// <summary>
+        /// 파일에서 객체를 불러옵니다.
+        /// </summary>
+        public void Load()
+        {
+            if (path == null)
+            {
+                throw new Exception("경로가 설정되지 않았습니다.");
+            }
+            if(!File.Exists(path))
+            {
+                throw new Exception("경로에 파일이 없습니다,");
+            }
+            SetBytes(File.ReadAllBytes(path));
+        }
+
+        /// <summary>
+        /// 바이트 배열에서 객체를 불러옵니다.
+        /// </summary>
+        /// <param name="bytes"></param>
+        public void SetBytes(byte[] bytes)
+        {
+            if(bytes == null)
+            {
+                throw new Exception("입력 배열이 null");
+            }
+
+            
+            List<Type> loadedtypes = new List<Type>(50);
+            loadedtypes.Add(typeof(Int16));
+            loadedtypes.Add(typeof(UInt16));
+            loadedtypes.Add(typeof(Int32));
+            loadedtypes.Add(typeof(UInt32));
+            loadedtypes.Add(typeof(Int64));
+            loadedtypes.Add(typeof(UInt64));
+            loadedtypes.Add(typeof(Single));
+            loadedtypes.Add(typeof(Double));
+            loadedtypes.Add(typeof(Byte));
+            loadedtypes.Add(typeof(SByte));
+            loadedtypes.Add(typeof(Decimal));
+            loadedtypes.Add(typeof(String));
+
+            byte[] mainbytes;
+            if (bytes[0] == 1)//헤더 읽기 시작
+            {
+                SetHeader(new byte[]{bytes[1]});
+                mainbytes = bytes[1..];
             }
             else
             {
-                foreach(Assembly assembly in LoadedAssemblies)
-                {
-                    t = assembly.GetType(str);
-                    if (t != null)
-                        return t;
-                }
-            }
-            return null;
-        }
-
-        private static byte[] ToBytes(this object obj, string objname)
-        {
-            if (IsFirst)
-            {
-                LoadBase();
-                IsFirst = false;
-            }
-            return ObjectTree.SetTree(new NamedObject(obj, objname)).GetBytes();
-        }
-
-        
-
-        
-
-
-        private static bool IsFirst = true;
-        private static void LoadBase()
-        {
-            LoadedAssemblies.AddRange(AppDomain.CurrentDomain.GetAssemblies());
-
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(int), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((int)nameobj.Data);
-                info.ObjectType = typeof(int);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(uint), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((uint)nameobj.Data);
-                info.ObjectType = typeof(uint);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(long), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((long)nameobj.Data);
-                info.ObjectType = typeof(long);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(ulong), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((ulong)nameobj.Data);
-                info.ObjectType = typeof(ulong);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(short), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((short)nameobj.Data);
-                info.ObjectType = typeof(short);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(ushort), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((ushort)nameobj.Data);
-                info.ObjectType = typeof(ushort);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(float), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((float)nameobj.Data);
-                info.ObjectType = typeof(float);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(double), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((double)nameobj.Data);
-                info.ObjectType = typeof(double);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(bool), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((bool)nameobj.Data);
-                info.ObjectType = typeof(bool);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(char), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = BitConverter.GetBytes((char)nameobj.Data);
-                info.ObjectType = typeof(char);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(string), (nameobj) =>
-            {
-                ObjectInfo info = new ObjectInfo();
-                info.Data = Encoding.UTF8.GetBytes((string)nameobj.Data);
-                info.ObjectType = typeof(string);
-                info.ObjectName = nameobj.Name;
-                return info;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(decimal), (nameobj) =>
-            {
-                return null;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(byte), (nameobj) =>
-            {
-                return null;
-            });
-            ObjectInfo.ObjectToInfoFunc.Add(typeof(sbyte), (nameobj) =>
-            {
-                return null;
-            });
-            ObjectInfo.DefaultToInfoFunc = (nameobj) =>
-            {
-                return null;
-            };
-
-            ObjectInfo.InfoToObjectFunc.Add(typeof(int), (info) =>
-            {
-                return new NamedObject(BitConverter.ToInt32(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(uint), (info) =>
-            {
-                return new NamedObject(BitConverter.ToUInt32(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(long), (info) =>
-            {
-                return new NamedObject(BitConverter.ToInt64(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(ulong), (info) =>
-            {
-                return new NamedObject(BitConverter.ToUInt64(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(short), (info) =>
-            {
-                return new NamedObject(BitConverter.ToInt16(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(ushort), (info) =>
-            {
-                return new NamedObject(BitConverter.ToUInt16(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(float), (info) =>
-            {
-                return new NamedObject(BitConverter.ToSingle(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(double), (info) =>
-            {
-                return new NamedObject(BitConverter.ToDouble(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(bool), (info) =>
-            {
-                return new NamedObject(BitConverter.ToBoolean(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(char), (info) =>
-            {
-                return new NamedObject(BitConverter.ToChar(info.Data, 0), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(string), (info) =>
-            {
-                return new NamedObject(Encoding.UTF8.GetString(info.Data), info.ObjectName);
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(decimal), (info) =>
-            {
-                return null;
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(byte), (info) =>
-            {
-                return null;
-            });
-            ObjectInfo.InfoToObjectFunc.Add(typeof(sbyte), (info) =>
-            {
-                return null;
-            });
-            ObjectInfo.InfoToDefaultFunc = (info) =>
-            {
-                return null;
-            };
-
-
-
-            ObjectTree.ObjectToTreeFunc.Add(typeof(Array), (nameobj) =>
-            {
-                int i = 0;
-                ObjectTree tree = new ObjectTree(nameobj.type, nameobj.Name);
-                ((IList)nameobj.Data).Cast<object>().ToList().ForEach((obj) => { tree.AddObject(new NamedObject(obj, i++.ToString())); });
-                return tree;
-            });
-            ObjectTree.DefaultToTreeFunc = (nameobj) =>
-            {
-                if (nameobj.Data.GetType().IsArray)
-                {
-                    return ObjectTree.ObjectToTreeFunc[typeof(Array)](nameobj);
-                }
-                ObjectTree objtree = new ObjectTree(nameobj.type, nameobj.Name);
-                Type objtype = nameobj.Data.GetType();
-                BindingFlags bindflags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-                System.Reflection.FieldInfo[] fieldinfo =
-                   objtype.GetFields(bindflags);
-                foreach (System.Reflection.FieldInfo info in fieldinfo)
-                {
-                    Type infotype = info.FieldType;
-                    object infovalue = info.GetValue(nameobj.Data);
-                    if (infovalue != null && (!Attribute.IsDefined(info, typeof(IgnoreSave))) || Attribute.IsDefined(info, typeof(ForceSave)))
-                    {
-                        objtree.AddObject(new NamedObject(infovalue, info.Name));
-                    }
-                }
-
-                return objtree;
-
-            };
-
-            ObjectTree.TreeToObjectFunc.Add(typeof(Array), (basetree) =>
-            {
-                //object obj = Activator.CreateInstance(basetree.type);
-
-                ArrayList al = new ArrayList();
-                foreach (ObjectInfo info in basetree.InnerDataList)
-                {
-                    al.Add(info.GetValue());
-                }
-                foreach (ObjectTree tree in basetree.InnerTreeList)
-                {
-                    al.Add(tree.GetObject().Data);
-                }
-                return new NamedObject(al.ToArray(basetree.type.GetElementType()), basetree.ObjectName);
-            });
-            ObjectTree.TreeToDefaultFunc = (basetree) =>
-            {
-                if (basetree.type.IsArray)
-                {
-                    return ObjectTree.TreeToObjectFunc[typeof(Array)](basetree);
-                }
-
-
-                NamedObject nameobj = new NamedObject(Activator.CreateInstance(basetree.type), basetree.ObjectName);
-                BindingFlags bindflags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-                List<System.Reflection.FieldInfo> infolist =
-                    basetree.type.GetFields(bindflags).ToList<FieldInfo>();
-                foreach (ObjectInfo objinfo in basetree.InnerDataList)
-                {
-                    foreach (FieldInfo info in infolist)
-                    {
-                        if (info.Name == objinfo.ObjectName)
-                        {
-                            info.SetValue(nameobj.Data, objinfo.GetValue());
-                            break;
-                        }
-
-                    }
-                    continue;
-                }
-                foreach (ObjectTree objtree in basetree.InnerTreeList)
-                {
-                    foreach (FieldInfo info in infolist)
-                    {
-                        if (info.Name == objtree.ObjectName)
-                        {
-                            Func<ObjectTree, NamedObject> function;
-                            Type objtype = objtree.type;
-                            if (objtype == null)
-                                break;
-                            if (ObjectTree.TreeToObjectFunc.TryGetValue(objtype, out function))
-                            {
-                                info.SetValue(nameobj.Data, function(objtree).Data);
-                            }
-                            else
-                            {
-                                info.SetValue(nameobj.Data, ObjectTree.TreeToDefaultFunc(objtree).Data);
-                            }
-
-                            break;
-                        }
-
-                    }
-                    continue;
-
-
-
-                }
-
-                return nameobj;
-
-            };
-        }
-
-        static ObjectSaver()
-        {
-
-        }
-
-
-        internal class NamedObject
-        {
-            public object Data;
-            public string Name;
-            public NamedObject(object obj, string objname)
-            {
-                Data = obj;
-                Name = objname;
-            }
-            ~NamedObject()
-            {
-                Data = null;
-                Name = null;
-            }
-            public Type type
-            {
-                get
-                {
-                    return Data.GetType();
-                }
-            }
-        }
-        internal class ObjectInfo
-        {
-            internal static Dictionary<Type, Func<NamedObject, ObjectInfo>> ObjectToInfoFunc = new Dictionary<Type, Func<NamedObject, ObjectInfo>>();
-            internal static Func<NamedObject, ObjectInfo> DefaultToInfoFunc;
-            internal static Dictionary<Type, Func<ObjectInfo, NamedObject>> InfoToObjectFunc = new Dictionary<Type, Func<ObjectInfo, NamedObject>>();
-            internal static Func<ObjectInfo, NamedObject> InfoToDefaultFunc;
-
-            internal Type ObjectType;
-            internal string ObjectName;
-            internal Byte[] Data;
-            internal string GetPath()
-            {
-                return ObjectType.ToString() + @" " + ObjectName;
+                mainbytes = bytes;
             }
 
-            internal ObjectInfo()
+           
+            if (this.header.compress)
             {
-
+                mainbytes = Decompress(mainbytes[1..]);
+            }
+            else
+            {
+                mainbytes = mainbytes[1..];
+            }
+            if(this.header.encryption)
+            {
+                mainbytes = Decrypt(mainbytes);
+            }
+            else
+            {
+                //그대로
             }
 
-            internal object GetValue()
+            int current = 0;
+
+            int typelength = ReadInt(this.header.typenamelength);
+
+            for (int i=0;i<typelength;i++)
             {
-                if (this.Data != null)
-                {
-                    Func<ObjectInfo, NamedObject> function;
-                    if (ObjectInfo.InfoToObjectFunc.TryGetValue(this.ObjectType, out function))
-                    {
-                        return function(this).Data;
-                    }
-                    else
-                    {
-                        return InfoToDefaultFunc(this).Data;
-                    }
-                }
-
-                return null;
-            }
-
-            internal static ObjectInfo GetInfo(NamedObject nameobj)
-            {
-                if (nameobj != null)
-                {
-                    if (nameobj.Data != null)
-                    {
-                        Func<NamedObject, ObjectInfo> function;
-                        if (ObjectToInfoFunc.TryGetValue(nameobj.type, out function))
-                        {
-                            return function(nameobj);
-                        }
-                    }
-                    else
-                    {
-                        return DefaultToInfoFunc(nameobj);
-                    }
-                }
-                return null;
-            }
-
-
-            internal List<byte> GetBytes()
-            {
-                List<byte> baselist = new List<byte>();
-                List<byte> imshilist = new List<byte>();
-                baselist.AddRange(this.ObjectType.ToString().ToBytes());
-                baselist.Add(32);
-                baselist.AddRange(this.ObjectName.ToBytes());
-                baselist.Add(32);
-                baselist.AddRange(BitConverter.GetBytes(this.Data.Length));
-                baselist.AddRange(this.Data);
-                return baselist;
-            }
-
-            internal static ObjectInfo BytesToInfo(List<byte> baselist)// this is ref
-            {
-                ObjectInfo baseinfo = new ObjectInfo();
-                //baselist.CopyTo(bytelist);
-                baseinfo.ObjectType = ObjectSaver.GetType(ReadNext(ref baselist));
-                baseinfo.ObjectName = ReadNext(ref baselist);
-                int length = ReadInt(ref baselist);
-                baseinfo.Data = ReadValue(ref baselist, length).ToArray();
-
-
-                return baseinfo;
-            }
-        }
-        internal class ObjectTree
-        {
-            internal static Dictionary<Type, Func<NamedObject, ObjectTree>> ObjectToTreeFunc = new Dictionary<Type, Func<NamedObject, ObjectTree>>();
-            internal static Func<NamedObject, ObjectTree> DefaultToTreeFunc;
-            internal static Dictionary<Type, Func<ObjectTree, NamedObject>> TreeToObjectFunc = new Dictionary<Type, Func<ObjectTree, NamedObject>>();
-            internal static Func<ObjectTree, NamedObject> TreeToDefaultFunc;
-            internal List<ObjectTree> InnerTreeList = new List<ObjectTree>();
-            internal List<ObjectInfo> InnerDataList = new List<ObjectInfo>();
-            internal Type type;
-            internal string ObjectName;
-            internal string GetPath()
-            {
-                return type.ToString() + @" " + ObjectName;
-            }
-            internal ObjectTree()
-            {
-
-            }
-            internal ObjectTree(Type type, string objname)
-            {
-                this.type = type;
-                this.ObjectName = objname;
-            }
-            internal ObjectTree(NamedObject nameobj)
-            {
-                this.type = nameobj.type;
-                this.ObjectName = nameobj.Name;
-            }
-
-            internal static ObjectTree SetTree(NamedObject nameobj)
-            {
-                return ObjectTree.DefaultToTreeFunc(nameobj);
-            }
-            internal void AddObject(NamedObject nameobj)
-            {
-
-                Type objtype = nameobj.Data.GetType();
-                if (objtype == null)
-                    return;
-                if (IsPrimitive(objtype))
-                {
-                    Func<NamedObject, ObjectInfo> function;
-                    if (ObjectInfo.ObjectToInfoFunc.TryGetValue(objtype, out function))
-                    {
-                        this.InnerDataList.Add(function(nameobj));
-                    }
-                    else
-                    {
-                        this.InnerDataList.Add(ObjectInfo.DefaultToInfoFunc(nameobj));
-                    }
-                }
-                else
-                {
-                    Func<NamedObject, ObjectTree> function;
-                    if (objtype.IsArray)
-                    {
-                        this.InnerTreeList.Add(ObjectTree.ObjectToTreeFunc[typeof(Array)](nameobj));
-                    }
-                    if (ObjectTree.ObjectToTreeFunc.TryGetValue(objtype, out function))
-                    {
-                        this.InnerTreeList.Add(function(nameobj));
-                    }
-                    else
-                    {
-                        this.InnerTreeList.Add(DefaultToTreeFunc(nameobj));
-                    }
-                }
-
-
-            }
-
-            internal byte[] GetBytes()
-            {
-                List<byte> baselist = new List<byte>();
-                List<byte> imshilist = new List<byte>();
-                baselist.AddRange(this.type.ToString().ToBytes());
-                baselist.Add(32);
-                baselist.AddRange(this.ObjectName.ToBytes());
-                baselist.Add(32);
-
-
-
-                foreach (ObjectInfo info in this.InnerDataList)
-                {
-                    imshilist.AddRange(info.GetBytes());
-                }
-                foreach (ObjectTree tree in this.InnerTreeList)
-                {
-                    imshilist.AddRange(tree.GetBytes());
-                }
-
-                baselist.AddRange(BitConverter.GetBytes(imshilist.Count));
-                baselist.AddRange(imshilist);
-
-
-
-
-                return baselist.ToArray();
-            }
-
-            internal static ObjectTree BytesToTree(List<byte> baselist)
-            {
-
-                ObjectTree basetree = new ObjectTree();
-                basetree.type = ObjectSaver.GetType(ReadNext(ref baselist));
-                if (basetree.type == null)
-                {
-                    throw new Exception("타입이 null");
-                }
-                basetree.ObjectName = ReadNext(ref baselist);
-                if (basetree.ObjectName == null)
-                {
-                    throw new Exception("이름이 null");
-                }
-                int length = ReadInt(ref baselist);
-                List<byte> newlist = ReadValue(ref baselist, length);
-                while (newlist.Count > 0)
-                {
-
-                    Type type = ObjectSaver.GetType(SafeReadNext(newlist));
-
-                    if (IsPrimitive(type))
-                    {
-                        basetree.InnerDataList.Add(ObjectInfo.BytesToInfo(newlist));
-                    }
-                    else
-                    {
-                        basetree.InnerTreeList.Add(ObjectTree.BytesToTree(newlist));
-                    }
-                }
-
-                return basetree;
-            }
-
-
-            /*
-            internal void Solidfy(string path)
-            {
-                Solidfy(new DirectoryInfo(path));
-            }
-            internal void Solidfy(DirectoryInfo basedi)
-            {
-                //Console.WriteLine("Save Object " + this.type.ToString());
-                //nowpath = Path.Combine(di.FullName, this.GetPath());
-                DirectoryInfo di = new DirectoryInfo(Path.Combine(basedi.FullName, this.GetPath()));
-                string imshi = this.GetPath();
-                try
-                {
-                    di.Create();
-                }
-                catch (DirectoryNotFoundException ex)
-                {
-                    throw new DirectoryNotFoundException("폴더 경로가 길어서 생성할수 없음. 경로 : " + di.FullName);
-                }
-                Console.WriteLine(di.FullName);
-                foreach (ObjectInfo info in this.InnerDataList)
-                {
-                    List<string> teststr = new List<string>();
-                    teststr.Add(di.FullName);
-                    teststr.Add(info.GetPath());
-                    File.WriteAllBytes(Path.Combine(di.FullName, info.GetPath()), info.Data);
-                }
-                foreach (ObjectTree tree in this.InnerTreeList)
-                {
-                    tree.Solidfy(di);
-                }
-            }
-            internal static ObjectTree DeSolidfy(string path)
-            {
-                return DeSolidfy(new DirectoryInfo(path));
-            }
-            internal static ObjectTree DeSolidfy(DirectoryInfo basedi)
-            {
-
-                Type type;
-                string name;
-                if (FixName(basedi.Name, out type, out name))
-                {
-
-                    DirectoryInfo[] dis;
-                    FileInfo[] fis;
-                    dis = basedi.GetDirectories("*", SearchOption.TopDirectoryOnly);
-                    fis = basedi.GetFiles();
-                    ObjectTree basetree = new ObjectTree(type, name);
-                    foreach (FileInfo fi in fis)
-                    {
-
-                        if (FixName(fi.Name, out type, out name))
-                        {
-                            ObjectInfo info = new ObjectInfo();
-                            info.Data = File.ReadAllBytes(fi.FullName);
-                            info.ObjectName = name;
-                            info.ObjectType = type;
-                            basetree.InnerDataList.Add(info);
-                        }
-                    }
-                    foreach (DirectoryInfo di in dis)
-                    {
-                        basetree.InnerTreeList.Add(DeSolidfy(di));
-                    }
-                    return basetree;
-                }
-
-
-                return null;
-
-
-
+                loadedtypes.Add(GetTypeFixed(ReadNameString()));
             }
             
+            this.obj = GetEverything().data;
+
+            //Inner 안붙은것 시작위치
+            //Everything : 타입 인덱스
+            //나머지 : 이름
+
+            //Inner 붙은것 시작위치
+            //Everything : 타입 인덱스
+            //나머지 : 크기 또는 값
+
+            //Inner 붙어있는건 이름 안가져 온다는 의미
 
 
-            private static bool FixName(string dirname, out Type type, out string name)
+            (object data,string name) GetEverything()
             {
-                string[] strs = dirname.Split(' ');
-                if (strs.Length != 2)
+                int typeindex = ReadInt(this.header.typenamelength);
+                Type type() => loadedtypes[typeindex];
+
+                if (typeindex < 12)//String까지
                 {
-                    type = null;
-                    name = null;
-                    return false;
+                    if (typeindex < 11)//String만 빼고
+                    {
+                        return GetPrimitive(typeindex);
+                    }
+                    else
+                    {
+                        return GetValueString();
+                    }
+                }
+                else if (type().IsArray)
+                {
+                    if(IsStaticSize(type().GetElementType()))
+                    {
+                        return GetStaticArray(type());
+                    }
+                    else
+                    {
+                        return GetDynamicArray(type());
+                    }
+                }
+                else if (IsAwesome(type()))
+                {
+                    
+                    return GetAwesome(type());
+                }
+                else//IsObject
+                {
+                    return GetObject(type());
+                }
+            }
+            object GetInnerEverything()
+            {
+                int typeindex = ReadInt(this.header.typenamelength);
+                Type type() => loadedtypes[typeindex];
+
+                if (typeindex < 12)//String까지
+                {
+                    if (typeindex < 11)//String만 빼고
+                    {
+                        return GetInnerPrimitive(typeindex);
+                    }
+                    else
+                    {
+                        return GetInnerValueString();
+                    }
+                }
+                else if (type().IsArray)
+                {
+                    if (IsStaticSize(type().GetElementType()))
+                    {
+                        return GetInnerStaticArray(type());
+                    }
+                    else
+                    {
+                        return GetInnerDynamicArray(type());
+                    }
+                }
+                else if (IsAwesome(type()))
+                {
+                    return GetInnerAwesome(type());
+                }
+                else//IsObject
+                {
+                    return GetInnerObject(type());
+                }
+            }
+            (object data, string name) GetObject(Type t)
+            {
+                string name = ReadNameString();
+
+                return (GetInnerObject(t),name);
+            }
+            object GetInnerObject(Type t)
+            {
+                object o = Activator.CreateInstance(t);
+                int endindex = ReadInt(this.header.filesizelength) + current;
+                BindingFlags bindflags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                System.Reflection.FieldInfo[] fieldinfos = t.GetFields(bindflags);
+                while (current < endindex)
+                {
+                    (object fieldobj, string fieldname) = GetEverything();
+
+                    bool IsSet = false;
+                    foreach (FieldInfo info in fieldinfos)
+                    {
+                        if (info.Name == fieldname)
+                        {
+                            info.SetValue(o, fieldobj);
+                            IsSet = true;
+                            break;
+                        }
+                    }
+                    if (!IsSet)
+                    {
+                        throw new Exception("값이 설정되지 못했습니다.");
+                    }
+
+
+
+                }
+                return o;
+            }
+            (object data,string name) GetStaticArray(Type t)
+            {
+                string name = ReadNameString();
+                return (GetInnerStaticArray(t), name);
+            }
+            object GetInnerStaticArray(Type t)
+            {
+                int count = ReadInt(4);
+                ArrayList arrayList = new ArrayList(count);
+
+                int typeindex = loadedtypes.IndexOf(t);
+
+
+                int elementtypeindex = loadedtypes.IndexOf(t.GetElementType());
+                for (int i = 0; i < count; i++)
+                {
+                    arrayList.Add(GetInnerPrimitive(elementtypeindex));
                 }
 
-                type = ObjectSaver.GetType(strs[0]);
-                name = strs[1];
+                return arrayList.ToArray(t.GetElementType());
+            }
+            (object data, string name) GetDynamicArray(Type t)
+            {
+                string name = ReadNameString();
+                return (GetInnerDynamicArray(t),name);
+            }
+            object GetInnerDynamicArray(Type t)
+            {
+                int count = ReadInt(4);
+                ArrayList arrayList = new ArrayList(count);
 
-                if (type == null || name == null || name == "")
+                int typeindex = loadedtypes.IndexOf(t);
+
+
+                int elementtypeindex = loadedtypes.IndexOf(t.GetElementType());
+                for (int i = 0; i < count; i++)
                 {
-                    type = null;
-                    name = null;
-                    return false;
+                    arrayList.Add(GetInnerEverything());
                 }
 
-                return true;
-            }
-            */
-            public NamedObject GetObject()
-            {
-
-                return ObjectTree.TreeToDefaultFunc(this);
-
-
+                return arrayList.ToArray(t.GetElementType());
             }
 
-
-
-
-
-
-        }
-
-
-        public class IgnoreSave : Attribute
-        {
-
-        }
-        public class ForceSave : Attribute
-        {
-
-        }
-
-
-        private static string SafeReadNext(List<byte> list)
-        {
-            int i = 0;
-            foreach (byte b in list)
+            (object data, string name) GetPrimitive(int typeindex)
             {
-                if (b == (byte)32)
+                string name = ReadNameString();
+                return (GetInnerPrimitive(typeindex), name);
+            }
+            object GetInnerPrimitive(int typeindex)
+            {
+                switch (typeindex)
                 {
-                    byte[] bytes = list.GetRange(0, i).ToArray();
-                    return Encoding.UTF8.GetString(bytes);
+                    case 0:
+                        current += 2;
+                        return BitConverter.ToInt16(mainbytes, current - 2);
+                    case 1:
+                        current += 2;
+                        return BitConverter.ToUInt16(mainbytes, current - 2);
+                    case 2:
+                        current += 4;
+                        return BitConverter.ToInt32(mainbytes, current - 4);
+                    case 3:
+                        current += 4;
+                        return BitConverter.ToUInt32(mainbytes, current - 4);
+                    case 4:
+                        current += 8;
+                        return BitConverter.ToInt32(mainbytes, current - 8);
+                    case 5:
+                        current += 8;
+                        return BitConverter.ToUInt32(mainbytes, current - 8);
+                    case 6:
+                        current += 4;
+                        return BitConverter.ToSingle(mainbytes, current - 4);
+                    case 7:
+                        current += 8;
+                        return BitConverter.ToDouble(mainbytes, current - 8);
+                    case 8:
+                        current += 1;
+                        return BitConverter.ToSingle(mainbytes, current - 1);
+                    case 9:
+                        current += 1;
+                        return BitConverter.ToDouble(mainbytes, current - 1);
+                    case 10:
+                        current += 24;
+                        return ByteArrayToDecimal(mainbytes, current - 24);
+                    default:
+                        throw new Exception("오류");
+
+                    
+                    
                 }
-                i++;
-            }
-            throw new Exception("더이상 스페이스바가 없음");
-        }
-        private static string ReadNext(ref List<byte> list)
-        {
-            int i = 0;
-            foreach (byte b in list)
-            {
-                if (b == (byte)32)
+
+
+                const byte DecimalSignBit = 128;
+                decimal ByteArrayToDecimal(byte[] src, int offset)
                 {
-                    byte[] bytes = list.GetRange(0, i).ToArray();
-                    list.RemoveRange(0, i + 1);
-                    return Encoding.UTF8.GetString(bytes);
+                    return new decimal(
+                        BitConverter.ToInt32(src, offset),
+                        BitConverter.ToInt32(src, offset + 4),
+                        BitConverter.ToInt32(src, offset + 8),
+                        src[offset + 15] == DecimalSignBit,
+                        src[offset + 14]);
                 }
-                i++;
             }
-            throw new Exception("더이상 스페이스바가 없음");
-        }
-        private static int ReadInt(ref List<byte> list)
-        {
-            int i = BitConverter.ToInt32(list.GetRange(0, 4).ToArray(), 0);
-
-            list.RemoveRange(0, 4);
-            return i;
-        }
-        private static List<byte> ReadValue(ref List<byte> list, int length)
-        {
-            List<byte> bytelist = list.GetRange(0, length);
-            list.RemoveRange(0, length);
-            return bytelist;
-        }
-        internal static byte[] ToBytes(this string str)
-        {
-            return Encoding.UTF8.GetBytes(str);
-        }
-        private static bool IsPrimitive(Type type)
-        {
-            try
+            (string data, string name) GetValueString()
             {
-                if (type == typeof(string))
-                    return true;
-                return IsPrimitive(Activator.CreateInstance(type));
+                string name = ReadNameString();
+                return (GetInnerValueString(), name);
             }
-            catch (MissingMethodException ex)
+            string GetInnerValueString()
             {
-                return false;
-            }
-        }
-        private static bool IsPrimitive(object obj)
-        {
-            switch (obj)
-            {
-                case int _:
-                case short _:
-                case long _:
-                case uint _:
-                case ushort _:
-                case ulong _:
-                case char _:
-                case decimal _:
-                case double _:
-                case float _:
-                case byte _:
-                case bool _:
-                case sbyte _:
-                case string _:
-                    return true;
-                default:
-                    return false;
-
-            }
-        }
-
-
-
-
-        private static void SaveFile(string path, byte[] bytes)
-        {
-            File.WriteAllBytes(path, Compress(bytes));
-
-            byte[] Compress(byte[] data)
-            {
-                MemoryStream output = new MemoryStream();
-                using (DeflateStream dstream = new DeflateStream(output, CompressionLevel.Optimal))
+                int size = ReadInt(this.header.filesizelength);
+                byte[] bytearray = new byte[size];
+                for (int i = 0; i < size; i++)
                 {
-                    dstream.Write(data, 0, data.Length);
+                    bytearray[i] = mainbytes[current + i];
                 }
-                return output.ToArray();
+                current += size;
+                return Encoding.UTF8.GetString(bytearray);
             }
-        }
-        private static byte[] ReadFile(string path)
-        {
-            return Decompress(File.ReadAllBytes(path));
+            (object data, string name) GetAwesome(Type t)
+            {
+                throw new NotImplementedException();
+            }
+            object GetInnerAwesome(Type t)
+            {
+                throw new NotImplementedException();
+            }
+            void SetHeader(byte[] bytearray)
+            {
+                this.header.compress = (bytearray[0] % 2) == 0 ? true : false;
+                this.header.encryption = (bytearray[0] % 4 / 2) == 0 ? true : false;
+                this.header.filesizelength = (UInt16)(((bytearray[0] % 16) / 4) + 1);
+                this.header.typenamelength = (UInt16)(((bytearray[0] % 64) / 16) + 1);
+            }
+
+            int ReadInt(int length)
+            {
+                byte[] bytearray = new byte[length];
+                for(int i=0;i<length;i++)
+                {
+                    bytearray[i] = mainbytes[current + i];
+                }
+                current += length;
+                return BitConverter.ToInt32(bytearray);
+            }
+
+            string ReadNameString()
+            {
+                int startindex = current;
+                while(mainbytes[current] != Spacebar)
+                {
+                    current++;
+                }
+                return Encoding.UTF8.GetString(mainbytes[startindex..current++]);
+            }
 
             byte[] Decompress(byte[] data)
             {
@@ -847,7 +760,109 @@ namespace ObjectManager
                 }
                 return output.ToArray();
             }
+            byte[] Decrypt(byte[] data)
+            {
+                throw new NotImplementedException();
+            }
+            Type GetTypeFixed(string str)
+            {
+                Type t = Type.GetType(str);
+                if (t != null)
+                {
+                    return t;
+                }
+                else
+                {
+                    foreach (Assembly assembly in LoadedAssemblies)
+                    {
+                        t = assembly.GetType(str);
+                        if (t != null)
+                            return t;
+                    }
+                }
+                return null;
+            }
+            
         }
+
+        const byte Spacebar = 0xFF;
+
+        //n : 헤더에 정해진 크기
+        //자유 : 자유로운 크기, 끝날때 스페이스바
+        //첫 바이트 : 헤더 사용 유무
+        //헤더 사용시 그다음 2바이트 : 헤더
+        //그다음 n바이트 : 사용할 타입 개수
+        //그다음 바이트부터 사용할 타입명 + 스페이스바 넣음
+        //그다음 n바이트 : 시작 객체 타입 인덱스
+        //그다음 바이트부터
+        //타입번호(n)+필드이름(자유)+스페이스바+크기(n)+데이터(크기)  :  객체나 Func등등 일때 string도 여기에 들어감
+        //타입번호(n)+필드이름(자유)+스페이스바+데이터(설정된값)  :  Primitive일때
+        //타입번호(n)+필드이름(자유)+스페이스바+배열갯수(4)+<데이터의 데이터(설정된값)> : Primitive의 배열일때
+        //타입번호(n)+필드이름(자유)+스페이스바+배열갯수(4)+<타입번호(n)+크기(n)+데이터의 데이터(설정된값)> : 객체의 배열일때
+
+        //암호화가 되있다면 헤더 이후 바이트가 암호화됨
+        //압축이 걸려있다면 헤더 이후 바이트가 압축됨
+        //암호화 먼저 하고 압축함
+
+        byte[] Trim(byte[] bytearray, int size)
+        {
+            byte[] newarray = new byte[size];
+            int i;
+            for (i = 0; i < this.header.filesizelength; i++)
+            {
+                newarray[i] = bytearray[i];
+            }
+            for (; i < bytearray.Length; i++)
+            {
+                if (bytearray[i] != 0)
+                {
+                    throw new Exception("바이트 수 부족");
+                }
+            }
+            return newarray;
+        }
+
+        bool IsPrimitive(Type t)
+        {
+            if (t.IsPrimitive || t == typeof(Decimal) || t == typeof(String))
+            {
+                return true;
+            }
+            return false;
+        }
+        bool IsAwesome(Type t)
+        {
+            return false;
+        }
+        bool IsStaticSize(Type t)
+        {
+            if (t.IsPrimitive || t == typeof(Decimal))
+            {
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// 표시한 필드를 저장하지 않습니다.
+        /// </summary>
+
+
+        static Assembly[] LoadedAssemblies;
+
+        static ObjectSaver()
+        {
+            LoadedAssemblies = AppDomain.CurrentDomain.GetAssemblies();
+        }
+
     }
 
+    public class IgnoreSave : Attribute
+    {
+
+    }
+    public class ForceSave : Attribute
+    {
+
+    }
 }
