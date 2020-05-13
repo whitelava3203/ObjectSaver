@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 
 namespace ObjectManager
 {
-    public class ObjectSaver
+    public class ObjectSaver : IDisposable
     {
         public ObjectSaver()
         {
@@ -26,20 +26,51 @@ namespace ObjectManager
         static readonly byte[] DataEnd = { _Initializer, _DataEnd };
 
         public Header header = new Header();
+        /// <summary>
+        /// 저장할 경로입니다.
+        /// </summary>
         public string path;
+
+        /// <summary>
+        /// 저장할 객체입니다.
+        /// </summary>
         public object BaseObject;
+
+        /// <summary>
+        /// 헤더 추가의 유무입니다.
+        /// 추가하지 않으면 불러올때 똑같은 ObjectSaver 객체가 필요합니다.
+        /// </summary>
         public bool createHeader = true;
 
         public class Header
         {
+            /// <summary>
+            /// 압축방식을 설정합니다.
+            /// </summary>
             public CompressionLevel CompressionLevel = CompressionLevel.Fastest;
+
+            /// <summary>
+            /// 암호화 여부를 설정합니다. 아직 안만듬
+            /// </summary>
             public bool Encrypted = false;
+
+            /// <summary>
+            /// true로 설정하면 타입을 쓰거나 읽지 않습니다.
+            /// </summary>
             public bool PreLoadedTypes = false;
+
+            /// <summary>
+            /// 다른걸로 바뀔예정
+            /// </summary>
             public bool MethodInstance = false;
+
+            /// <summary>
+            /// 객체의 어셈블리도 같이 저장합니다. 아직 안만듬
+            /// </summary>
             public bool FullCopyType = false;
         }
 
-        public List<Type> loadedTypes = new List<Type>(32);
+        private List<Type> loadedTypes = new List<Type>(64);
 
         private void ClearLoadedTypes()
         {
@@ -57,6 +88,105 @@ namespace ObjectManager
             loadedTypes.Add(typeof(Decimal));
             loadedTypes.Add(typeof(String));
         }
+
+        private void AssignAllTypes()
+        {
+            ClearLoadedTypes();
+            AssignEverything(BaseObject);
+            return;
+
+
+            void AssignEverything(object obj)
+            {
+                if (obj == null) return;
+
+                Type t = obj.GetType();
+
+                if (IsPrimitive(t))
+                {
+                    return;
+                }
+                if (IsString(t))
+                {
+                    return;
+                }
+
+                AssignType(t);
+
+                if (t.IsArray)
+                {
+                    AssignArray(obj);
+                    return;
+                }
+                {
+                    AssignObject(obj);
+                    return;
+                }
+            }
+            void AssignObject(object obj)
+            {
+                Type baseType = obj.GetType();
+                for (int i = 0; baseType.BaseType != null; i++)
+                {
+                    AssignObjectField(baseType);
+                    baseType = baseType.BaseType;
+                }
+
+
+                void AssignObjectField(Type t)
+                {
+                    BindingFlags bindflags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+                    System.Reflection.FieldInfo[] fieldinfo = baseType.GetFields(bindflags);
+                    foreach (System.Reflection.FieldInfo info in fieldinfo)
+                    {
+                        if ((!Attribute.IsDefined(info, typeof(IgnoreSave)) || Attribute.IsDefined(info, typeof(ForceSave))))
+                        {
+                            AssignEverything(info.GetValue(obj));
+                        }
+                    }
+                }
+            }
+            void AssignArray(object obj)
+            {
+                Type t = obj.GetType();
+                Type elementType = t.GetElementType();
+                if (IsPrimitive(elementType))
+                {
+                    return;
+                }
+                if (IsString(elementType))
+                {
+                    return;
+                }
+                if (elementType.IsSealed)
+                {
+                    Array arr = obj as Array;
+                    foreach (object o in arr)
+                    {
+                        AssignEverything(o);
+                        if (o != null) return;
+                        //sealed라 타입이 다 똑같아서 하나만 보고 끝
+                    }
+                }
+                else
+                {
+                    Array arr = obj as Array;
+                    foreach (object o in arr)
+                    {
+                        AssignEverything(o);
+                    }
+                    return;
+                }
+            }
+            void AssignType(Type t)
+            {
+                if (!loadedTypes.Contains(t))
+                {
+                    loadedTypes.Add(t);
+                }
+            }
+        }
+
         private IEnumerable RealLoadedTypes
         {
             get
@@ -65,8 +195,22 @@ namespace ObjectManager
             }
         }
 
+        /// <summary>
+        /// 경로에 기본 설정을 사용해 객체를 저장합니다.
+        /// </summary>
+        public static void Save(object obj, string path)
+        {
+            using (ObjectSaver saver = new ObjectSaver())
+            {
+                saver.BaseObject = obj;
+                saver.path = path;
+                saver.Save();
+            }
+        }
 
-
+        /// <summary>
+        /// 경로에 지정된 설정을 사용해 객체를 저장합니다.
+        /// </summary>
         public void Save()
         {
             if(BaseObject == null)
@@ -171,6 +315,8 @@ namespace ObjectManager
 
                 void WriteEverythingBytes(object obj, string name, bool writeType = true)
                 {
+                    if (obj == null) return;
+
                     Type t = obj.GetType();
                     if (writeType)
                     {
@@ -307,11 +453,11 @@ namespace ObjectManager
                     }
                     else if(t.IsSealed)//타입명 생략
                     {
-                        WriteObjectArrayBytes(obj, false);
+                        WriteDynamicArrayBytes(obj, false);
                     }
                     else//다써
                     {
-                        WriteObjectArrayBytes(obj);
+                        WriteDynamicArrayBytes(obj);
                     }
 
                     void WritePrimitiveArrayBytes(object obj)
@@ -335,7 +481,7 @@ namespace ObjectManager
                         //배열 추가 완료
                         return;
                     }
-                    void WriteObjectArrayBytes(object obj, bool writeType = true)
+                    void WriteDynamicArrayBytes(object obj, bool writeType = true)
                     {
                         Type elementType = obj.GetType().GetElementType();
 
@@ -349,6 +495,15 @@ namespace ObjectManager
 
                         foreach (object o in objarr)
                         {
+                            if(o == null)
+                            {
+                                StreamWrite(new byte[] { 0x00 }, false);
+                            }
+                            else
+                            {
+                                StreamWrite(new byte[] { 0x01 }, false);
+                            }
+
                             WriteEverythingBytes(o, "", writeType);
                         }
 
@@ -385,103 +540,23 @@ namespace ObjectManager
             }
         }
 
-
-        public void AssignAllTypes()
+        /// <summary>
+        /// 경로에 있는 파일에서 기본 설정을 사용해 객체를 불러옵니다.
+        /// </summary>
+        public static object Load(string path)
         {
-            ClearLoadedTypes();
-            AssignEverything(BaseObject);
-            return;
-
-
-            void AssignEverything(object obj)
+            object output;
+            using (ObjectSaver saver = new ObjectSaver())
             {
-                Type t = obj.GetType();
-                
-                if (IsPrimitive(t))
-                {
-                    return;
-                }
-                if (IsString(t))
-                {
-                    return;
-                }
-
-                AssignType(t);
-
-                if (t.IsArray)
-                {
-                    AssignArray(obj);
-                    return;
-                }
-                {
-                    AssignObject(obj);
-                    return;
-                }
+                saver.path = path;
+                output = saver.Load();
             }
-            void AssignObject(object obj)
-            {
-                Type baseType = obj.GetType();
-                for (int i = 0; baseType.BaseType != null; i++)
-                {
-                    AssignObjectField(baseType);
-                    baseType = baseType.BaseType;
-                }
-
-
-                void AssignObjectField(Type t)
-                {
-                    BindingFlags bindflags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-                    System.Reflection.FieldInfo[] fieldinfo = baseType.GetFields(bindflags);
-                    foreach (System.Reflection.FieldInfo info in fieldinfo)
-                    {
-                        if ((!Attribute.IsDefined(info, typeof(IgnoreSave)) || Attribute.IsDefined(info, typeof(ForceSave))))
-                        {
-                            AssignEverything(info.GetValue(obj));
-                        }
-                    }
-                }
-            }
-            void AssignArray(object obj)
-            {
-                Type t = obj.GetType();
-                Type elementType = t.GetElementType();
-                if (IsPrimitive(elementType))
-                {
-                    return;
-                }
-                if (IsString(elementType))
-                {
-                    return;
-                }
-                if (elementType.IsSealed)
-                {
-                    Array arr = obj as Array;
-                    foreach (object o in arr)
-                    {
-                        AssignEverything(o);
-                        return;
-                        //sealed라 타입이 다 똑같아서 하나만 보고 끝
-                    }
-                }
-                else
-                {
-                    Array arr = obj as Array;
-                    foreach (object o in arr)
-                    {
-                        AssignEverything(o);
-                    }
-                    return;
-                }
-            }
-            void AssignType(Type t)
-            {
-                if (!loadedTypes.Contains(t))
-                {
-                    loadedTypes.Add(t);
-                }
-            }
+            return output;
         }
 
+        /// <summary>
+        /// 경로에 있는 파일에서 지정된 설정을 사용해 객체를 불러옵니다.
+        /// </summary>
         public object Load()
         {
             if(path == null)
@@ -576,9 +651,11 @@ namespace ObjectManager
             {
                 this.BaseObject = GetEverything(false).data;
                 return;
-
+                
                 (object data, string name) GetEverything(bool readName = true, Type preLoadedType = null)
                 {
+
+
                     int typeindex;
                     Type type;
                     if (preLoadedType == null)
@@ -662,7 +739,7 @@ namespace ObjectManager
 
                     List<Type> GetBaseTypes(Type baseType)
                     {
-                        List<Type> baseTypeList = new List<Type>();
+                        List<Type> baseTypeList = new List<Type>(8);
                         baseTypeList.Add(baseType);
                         Type t = baseType;
                         while (t.BaseType != null)
@@ -676,7 +753,7 @@ namespace ObjectManager
                     List<FieldInfo[]> GetBaseFieldInfos(List<Type> types)
                     {
                         BindingFlags bindflags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-                        List<FieldInfo[]> fieldinfos = new List<FieldInfo[]>();
+                        List<FieldInfo[]> fieldinfos = new List<FieldInfo[]>(128);
                         foreach (Type type in types)
                         {
                             fieldinfos.Add(type.GetFields(bindflags));
@@ -745,11 +822,17 @@ namespace ObjectManager
                         Type elementtype = t.GetElementType();
                         Array array = Array.CreateInstance(elementtype, length);
 
-                        for(int i=0;i<length;i++)
-                        {
-                            array.SetValue(GetEverything(readElementType), i);
-                        }
+                        Type preLoadedType = readElementType ? null : elementtype;
 
+                        byte nullcheck;
+                        for (int i=0;i<length;i++)
+                        {
+                            nullcheck = StreamReadSized(1)[0];
+                            if(nullcheck == 0x01)
+                            {
+                                array.SetValue(GetEverything(false, preLoadedType).data, i);
+                            }
+                        }
                         return array;
                     }
                 }
@@ -992,12 +1075,57 @@ namespace ObjectManager
             }
             return null;
         }
-        static Assembly[] LoadedAssemblies;
+
+        public static Assembly[] LoadedAssemblies;
 
         static ObjectSaver()
         {
             LoadedAssemblies = AppDomain.CurrentDomain.GetAssemblies();
         }
+
+        #region IDisposable Support
+        private bool disposedValue = false; // 중복 호출을 검색하려면
+
+        protected virtual void Dispose(bool disposing)
+        {
+            if (!disposedValue)
+            {
+                if (disposing)
+                {
+                    this.path = null;
+                    this.header = null;
+                    this.loadedTypes.Clear();
+                    this.loadedTypes = null;
+                    
+                    // TODO: 관리되는 상태(관리되는 개체)를 삭제합니다.
+
+                }
+
+                this.BaseObject = null;
+
+                // TODO: 관리되지 않는 리소스(관리되지 않는 개체)를 해제하고 아래의 종료자를 재정의합니다.
+                // TODO: 큰 필드를 null로 설정합니다.
+
+                disposedValue = true;
+            }
+        }
+
+        // TODO: 위의 Dispose(bool disposing)에 관리되지 않는 리소스를 해제하는 코드가 포함되어 있는 경우에만 종료자를 재정의합니다.
+        // ~ObjectSaver()
+        // {
+        //   // 이 코드를 변경하지 마세요. 위의 Dispose(bool disposing)에 정리 코드를 입력하세요.
+        //   Dispose(false);
+        // }
+
+        // 삭제 가능한 패턴을 올바르게 구현하기 위해 추가된 코드입니다.
+        void IDisposable.Dispose()
+        {
+            // 이 코드를 변경하지 마세요. 위의 Dispose(bool disposing)에 정리 코드를 입력하세요.
+            Dispose(true);
+            // TODO: 위의 종료자가 재정의된 경우 다음 코드 줄의 주석 처리를 제거합니다.
+            // GC.SuppressFinalize(this);
+        }
+        #endregion
 
 
     }
@@ -1070,11 +1198,7 @@ namespace ObjectManager
             return input;
         }
     }
-    //헤더
-    //사용할 타입들
-    //내용
 
-    //타입 + 이름 + 
 
     public class IgnoreSave : Attribute
     {
